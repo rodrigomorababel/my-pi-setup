@@ -1,17 +1,21 @@
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import type {
   ExtensionAPI,
   ExtensionContext,
+  Theme,
 } from "@mariozechner/pi-coding-agent";
+import { Text } from "@mariozechner/pi-tui";
 
 const RESET = "\x1b[0m";
 const BOLD = "\x1b[1m";
 
-const DEEP_BLUE: Rgb = [22, 83, 189];
-const BLUE: Rgb = [48, 129, 247];
-const SKY: Rgb = [93, 171, 255];
-const ICE: Rgb = [151, 205, 255];
-const PALETTE: Rgb[] = [DEEP_BLUE, BLUE, SKY, ICE, SKY, BLUE];
+const DEEP_ORANGE: Rgb = [180, 70, 0];
+const ORANGE: Rgb = [247, 128, 24];
+const AMBER: Rgb = [255, 170, 48];
+const GOLD: Rgb = [255, 210, 105];
+const PALETTE: Rgb[] = [DEEP_ORANGE, ORANGE, AMBER, GOLD, AMBER, ORANGE];
 
 type Rgb = [number, number, number];
 type Renderable = {
@@ -25,12 +29,12 @@ const ANSI_PATTERN =
   /[\u001B\u009B][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[a-zA-Z\d]*)*)?\u0007)|(?:(?:\d{1,4}(?:;\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g;
 
 const TITLE_LINES = [
-  "  ██████╗  ██╗ ",
-  "  ██╔══██╗ ██║ ",
-  "  ██████╔╝ ██║ ",
-  "  ██╔═══╝  ██║ ",
-  "  ██║      ██║ ",
-  "  ╚═╝      ╚═╝ ",
+  "  ██████╗  █████╗ ██████╗ ███████╗██╗     ",
+  "  ██╔══██╗██╔══██╗██╔══██╗██╔════╝██║     ",
+  "  ██████╔╝███████║██████╔╝█████╗  ██║     ",
+  "  ██╔══██╗██╔══██║██╔══██╗██╔══╝  ██║     ",
+  "  ██████╔╝██║  ██║██████╔╝███████╗███████╗",
+  "  ╚═════╝ ╚═╝  ╚═╝╚═════╝ ╚══════╝╚══════╝",
 ];
 
 function mix(a: number, b: number, t: number) {
@@ -117,6 +121,42 @@ function isBlankSpacer(component: Renderable) {
   return renderedText(component).trim() === "";
 }
 
+function discoverExtensionNames(cwd: string) {
+  const agentDir = process.env.PI_CODING_AGENT_DIR ?? path.join(os.homedir(), ".pi", "agent");
+  const settingsPath = path.join(agentDir, "settings.json");
+  const names = new Set<string>();
+
+  function addDir(dir: string) {
+    if (!fs.existsSync(dir)) return;
+    for (const entry of fs.readdirSync(dir)) {
+      const full = path.join(dir, entry);
+      try {
+        const stat = fs.statSync(full);
+        if (stat.isFile() && /\.[cm]?tsx?$/.test(entry)) names.add(entry);
+        if (stat.isDirectory() && ["index.ts", "index.tsx", "index.js"].some((file) => fs.existsSync(path.join(full, file)))) names.add(entry);
+      } catch {
+        // ignore unreadable entries
+      }
+    }
+  }
+
+  addDir(path.join(agentDir, "extensions"));
+  addDir(path.join(cwd, ".pi", "extensions"));
+
+  try {
+    const settings = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+    for (const pkg of Array.isArray(settings.packages) ? settings.packages : []) {
+      if (typeof pkg !== "string" || pkg.includes(":")) continue;
+      const pkgDir = path.isAbsolute(pkg) ? pkg : path.join(agentDir, pkg);
+      addDir(path.join(pkgDir, "extensions"));
+    }
+  } catch {
+    // ignore settings parse errors
+  }
+
+  return [...names].sort((a, b) => a.localeCompare(b));
+}
+
 function renderHeader(width: number, phase: number, subtitleText: string) {
   const lines = TITLE_LINES.map((line, row) =>
     gradientText(center(line, width), phase + row * 0.045),
@@ -131,9 +171,19 @@ function renderHeader(width: number, phase: number, subtitleText: string) {
   ];
 }
 
+function resourceSection(title: string, names: string[], theme: Theme) {
+  return `${theme.fg("mdHeading", `[${title}]`)}\n${theme.fg("dim", `  ${names.length ? names.join(", ") : "none"}`)}`;
+}
+
 export default function (pi: ExtensionAPI) {
   let requestRender: (() => void) | undefined;
   let currentModelId = "no model selected";
+
+  pi.registerMessageRenderer<{ extensions: string[]; themes: string[] }>("new-session-resources", (message, _options, theme) => {
+    const extensions = message.details?.extensions ?? [];
+    const themes = message.details?.themes ?? [];
+    return new Text(`${resourceSection("Extensions", extensions, theme)}\n\n${resourceSection("Themes", themes, theme)}`, 0, 0);
+  });
 
   function installHeader(ctx: ExtensionContext) {
     ctx.ui.setHeader((tui) => {
@@ -149,10 +199,31 @@ export default function (pi: ExtensionAPI) {
     });
   }
 
-  pi.on("session_start", (_event, ctx) => {
+  pi.on("session_start", (event, ctx) => {
     currentModelId = ctx.model?.id ?? "no model selected";
     if (!ctx.hasUI) return;
+
     installHeader(ctx);
+
+    if (event.reason === "new") {
+      setTimeout(() => {
+        pi.sendMessage({
+          customType: "new-session-resources",
+          content: "",
+          display: true,
+          details: {
+            extensions: discoverExtensionNames(ctx.cwd),
+            themes: ctx.ui.getAllThemes().map((theme) => theme.name).sort((a, b) => a.localeCompare(b)),
+          },
+        });
+      }, 0);
+    }
+
+    // /new, /resume, and /fork rebuild parts of the TUI after session_start.
+    // Re-apply the header on the next tick so it survives that replacement flow too.
+    if (event.reason !== "startup") {
+      setTimeout(() => installHeader(ctx), 0);
+    }
   });
 
   pi.on("model_select", (event) => {
@@ -160,12 +231,18 @@ export default function (pi: ExtensionAPI) {
     requestRender?.();
   });
 
-  pi.on("session_shutdown", (_event, ctx) => {
-    if (ctx.hasUI) ctx.ui.setHeader(undefined);
+  pi.on("session_shutdown", (event, ctx) => {
+    requestRender = undefined;
+
+    // Don't clear the header during session replacement flows. The new extension
+    // instance will install its header for the replacement session.
+    if (ctx.hasUI && (event.reason === "quit" || event.reason === "reload")) {
+      ctx.ui.setHeader(undefined);
+    }
   });
 
   pi.registerCommand("flow-title", {
-    description: "Enable the blue flowing gradient session header",
+    description: "Enable the orange BABEL flowing gradient session header",
     handler: async (_args, ctx) => {
       installHeader(ctx);
       ctx.ui.notify("Flow title enabled", "info");
