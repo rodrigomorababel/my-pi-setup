@@ -49,7 +49,7 @@ FIRECRAWL_API_KEY=your_firecrawl_key_here
 From this directory:
 
 ```bash
-pnpm exec pi
+pi
 ```
 
 ## What is included
