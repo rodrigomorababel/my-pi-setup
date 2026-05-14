@@ -21,12 +21,10 @@ This setup is expected to live at `~/.pi/agent/my-pi-setup`.
 
 ```bash
 mkdir -p ~/.pi/agent
-git clone <REPO_URL> ~/.pi/agent/my-pi-setup
+git clone https://github.com/rodrigomorababel/my-pi-setup.git ~/.pi/agent/my-pi-setup
 cd ~/.pi/agent/my-pi-setup
 pnpm install
 ```
-
-Replace `<REPO_URL>` with the URL of this repository.
 
 ## Configure environment variables
 
