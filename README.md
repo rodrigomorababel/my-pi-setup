@@ -52,12 +52,6 @@ From this directory:
 pnpm exec pi
 ```
 
-Or add a shell alias:
-
-```bash
-alias pi='cd ~/.pi/agent/my-pi-setup && pnpm exec pi'
-```
-
 ## What is included
 
 - `settings.json` — default Pi settings, provider/model, and theme selection
