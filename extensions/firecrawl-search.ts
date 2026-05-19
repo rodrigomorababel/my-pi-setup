@@ -4,7 +4,7 @@ import { join } from "node:path";
 import Firecrawl from "@mendable/firecrawl-js";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { StringEnum } from "@mariozechner/pi-ai";
-import { Type } from "@sinclair/typebox";
+import { Type } from "typebox";
 
 function readEnvValue(name: string) {
   if (process.env[name]) return process.env[name];
@@ -53,6 +53,54 @@ function stringify(value: unknown) {
   return JSON.stringify(value, null, 2);
 }
 
+function truncate(text: string, maxChars: number) {
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars).trimEnd()}\n…[truncated ${text.length - maxChars} chars]`;
+}
+
+function pickString(value: unknown, keys: string[]) {
+  if (!value || typeof value !== "object") return undefined;
+  const record = value as Record<string, unknown>;
+
+  for (const key of keys) {
+    const candidate = record[key];
+    if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
+  }
+
+  return undefined;
+}
+
+function formatSearchResults(result: unknown, maxContentChars: number) {
+  if (!result || typeof result !== "object") return stringify(result);
+
+  const sections: string[] = [];
+  const record = result as Record<string, unknown>;
+
+  for (const source of ["web", "news", "images"] as const) {
+    const items = record[source];
+    if (!Array.isArray(items) || items.length === 0) continue;
+
+    const lines = items.map((item, index) => {
+      const metadata = item && typeof item === "object" ? (item as Record<string, unknown>).metadata : undefined;
+      const metadataRecord = metadata && typeof metadata === "object" ? metadata as Record<string, unknown> : undefined;
+
+      const title = pickString(item, ["title"]) ?? pickString(metadataRecord, ["title", "ogTitle"]) ?? "Untitled";
+      const url = pickString(item, ["url", "imageUrl"]) ?? pickString(metadataRecord, ["url", "sourceURL", "ogUrl"]) ?? "No URL";
+      const description = pickString(item, ["description", "snippet"]) ?? pickString(metadataRecord, ["description", "ogDescription"]);
+      const markdown = pickString(item, ["markdown"]);
+
+      const parts = [`${index + 1}. ${title}`, `   URL: ${url}`];
+      if (description) parts.push(`   Snippet: ${description}`);
+      if (markdown && maxContentChars > 0) parts.push(`   Markdown preview:\n${truncate(markdown, maxContentChars).replace(/^/gm, "     ")}`);
+      return parts.join("\n");
+    });
+
+    sections.push(`${source.toUpperCase()} RESULTS\n${lines.join("\n\n")}`);
+  }
+
+  return sections.length ? sections.join("\n\n") : stringify(result);
+}
+
 function asErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
@@ -72,6 +120,7 @@ export default function (pi: ExtensionAPI) {
       limit: Type.Optional(Type.Number({ description: "Maximum number of results to return. Defaults to 5.", minimum: 1, maximum: 20 })),
       source: Type.Optional(StringEnum(["web", "news", "images"] as const)),
       scrapeResults: Type.Optional(Type.Boolean({ description: "Whether to scrape result pages and include markdown. Defaults to false." })),
+      maxContentChars: Type.Optional(Type.Number({ description: "Maximum markdown preview characters per scraped search result. Defaults to 2000. Use 0 to omit markdown from tool output while keeping full details available.", minimum: 0, maximum: 20000 })),
     }),
     async execute(_toolCallId, params, signal, onUpdate) {
       try {
@@ -91,7 +140,7 @@ export default function (pi: ExtensionAPI) {
         if (signal?.aborted) throw new Error("Search cancelled");
 
         return {
-          content: [{ type: "text", text: stringify(result) }],
+          content: [{ type: "text", text: formatSearchResults(result, params.maxContentChars ?? 2000) }],
           details: result,
         };
       } catch (error) {
