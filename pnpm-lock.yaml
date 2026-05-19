@@ -14,6 +14,9 @@ importers:
       '@mariozechner/pi-coding-agent':
         specifier: ^0.66.1
         version: 0.66.1(ws@8.20.0)(zod@4.3.6)
+      '@mariozechner/pi-tui':
+        specifier: ^0.66.1
+        version: 0.66.1
       '@mendable/firecrawl-js':
         specifier: ^4.20.0
         version: 4.20.0
@@ -278,6 +281,7 @@ packages:
   '@mariozechner/pi-tui@0.66.1':
     resolution: {integrity: sha512-hNFN42ebjwtfGooqoUwM+QaPR1XCyqPuueuP3aLOWS1bZ2nZP/jq8MBuGNrmMw1cgiDcotvOlSNj3BatzEOGsw==}
     engines: {node: '>=20.0.0'}
+    deprecated: please use @earendil-works/pi-tui instead going forward
 
   '@mendable/firecrawl-js@4.20.0':
     resolution: {integrity: sha512-1Ifogzla/gxWv2zkkTu56solIBQengSzbIfJaU0SIjrwGs4KZ+PPtZdATN+dm53jD3oUu1kKYEpGbRbWDuq/7g==}
