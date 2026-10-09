@@ -1,0 +1,9 @@
+{
+  "name": "remember-model",
+  "scripts": {
+    "check": "tsc --noEmit -p .",
+    "test": "node --test --experimental-strip-types index.test.ts settings.test.ts"
+  },
+  "type": "module",
+  "private": true
+}

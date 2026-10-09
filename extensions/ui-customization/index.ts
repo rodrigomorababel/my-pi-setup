@@ -1,0 +1,329 @@
+import { homedir } from "node:os";
+import { relative } from "node:path";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+  ReadonlyFooterDataProvider,
+} from "@earendil-works/pi-coding-agent";
+import {
+  getCapabilities,
+  hyperlink,
+  truncateToWidth,
+  visibleWidth,
+  type Component,
+} from "@earendil-works/pi-tui";
+import {
+  emptyGitInfoState,
+  emptyModelInfoState,
+  GIT_INFO_CHANNEL,
+  MODEL_INFO_CHANNEL,
+  REFRESH_CHANNEL,
+  isGitInfoState,
+  isModelInfoState,
+} from "../shared/dashboard-state.ts";
+import { createFullscreenScrollOverride } from "./src/fullscreen-scroll.ts";
+import { hideLoadedThemes } from "./src/theme-section.ts";
+
+type Rgb = [number, number, number];
+interface DashboardTui {
+  requestRender(force?: boolean): void;
+}
+
+const RESET = "\x1b[0m";
+const BOLD = "\x1b[1m";
+const PALETTE: Rgb[] = [
+  [180, 70, 0],
+  [247, 128, 24],
+  [255, 170, 48],
+  [255, 210, 105],
+  [255, 170, 48],
+  [247, 128, 24],
+];
+const TITLE_LINES = [
+  "  ██████╗  █████╗ ██████╗ ███████╗██╗     ",
+  "  ██╔══██╗██╔══██╗██╔══██╗██╔════╝██║     ",
+  "  ██████╔╝███████║██████╔╝█████╗  ██║     ",
+  "  ██╔══██╗██╔══██║██╔══██╗██╔══╝  ██║     ",
+  "  ██████╔╝██║  ██║██████╔╝███████╗███████╗",
+  "  ╚═════╝ ╚═╝  ╚═╝╚═════╝ ╚══════╝╚══════╝",
+];
+// eslint-disable-next-line no-control-regex
+const OSC_PATTERN =
+  /(?:\u001b\]|\u009d)(?:[^\u0007\u001b\u009c]|\u001b(?!\\))*(?:\u0007|\u001b\\|\u009c)/g;
+// eslint-disable-next-line no-control-regex
+const CSI_PATTERN = /(?:\u001b\[|\u009b)[0-?]*[ -/]*[@-~]/g;
+// eslint-disable-next-line no-control-regex
+const ESCAPE_PATTERN = /\u001b(?:[()][0-2A-Z]|[ -/]*[@-~])/g;
+
+function sanitizeTerminalLabel(text: string) {
+  return text
+    .replace(OSC_PATTERN, "")
+    .replace(CSI_PATTERN, "")
+    .replace(ESCAPE_PATTERN, "")
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, "");
+}
+
+function mix(a: number, b: number, amount: number) {
+  return Math.round(a + (b - a) * amount);
+}
+
+function sampleGradient(position: number) {
+  const wrapped = ((position % 1) + 1) % 1;
+  const scaled = wrapped * PALETTE.length;
+  const index = Math.floor(scaled);
+  const nextIndex = (index + 1) % PALETTE.length;
+  const amount = scaled - index;
+  const start = PALETTE[index]!;
+  const end = PALETTE[nextIndex]!;
+
+  return [
+    mix(start[0], end[0], amount),
+    mix(start[1], end[1], amount),
+    mix(start[2], end[2], amount),
+  ] satisfies Rgb;
+}
+
+function foreground([red, green, blue]: Rgb, text: string) {
+  return `\x1b[38;2;${red};${green};${blue}m${text}${RESET}`;
+}
+
+function gradientText(text: string, phase: number) {
+  const characters = [...text];
+  const span = Math.max(characters.length - 1, 1);
+
+  return characters
+    .map((character, index) =>
+      character === " "
+        ? character
+        : foreground(sampleGradient(index / span + phase), character),
+    )
+    .join("");
+}
+
+function formatTokens(tokens: number) {
+  if (tokens < 1_000) return `${tokens}`;
+  if (tokens < 1_000_000) return `${Math.round(tokens / 1_000)}k`;
+  return `${(tokens / 1_000_000).toFixed(1)}m`;
+}
+
+function formatDirectory(cwd: string) {
+  const home = homedir();
+  if (cwd === home) return "~";
+  const display = cwd.startsWith(`${home}/`) ? `~/${relative(home, cwd)}` : cwd;
+  return sanitizeTerminalLabel(display);
+}
+
+function center(text: string, width: number) {
+  const padding = Math.max(0, Math.floor((width - visibleWidth(text)) / 2));
+  return truncateToWidth(`${" ".repeat(padding)}${text}`, width);
+}
+
+function columns(left: string, right: string, width: number) {
+  if (!right) return truncateToWidth(left, width);
+
+  const naturalGap = width - visibleWidth(left) - visibleWidth(right);
+  if (naturalGap >= 1) return `${left}${" ".repeat(naturalGap)}${right}`;
+
+  const leftWidth = Math.max(1, Math.floor(width * 0.45));
+  const rightWidth = Math.max(1, width - leftWidth - 1);
+  const fittedLeft = truncateToWidth(left, leftWidth);
+  const fittedRight = truncateToWidth(right, rightWidth);
+  const gap = Math.max(
+    1,
+    width - visibleWidth(fittedLeft) - visibleWidth(fittedRight),
+  );
+  return truncateToWidth(
+    `${fittedLeft}${" ".repeat(gap)}${fittedRight}`,
+    width,
+  );
+}
+
+export default function uiCustomization(pi: ExtensionAPI) {
+  const fullscreenScroll = createFullscreenScrollOverride();
+  let title = "pi";
+  let modelInfo = emptyModelInfoState();
+  let gitInfo = emptyGitInfoState();
+  let requestRender: (() => void) | undefined;
+  let activeTui: DashboardTui | undefined;
+  let activeHeader: Component | undefined;
+  let activeFooter: Component | undefined;
+  const themeRemovalTimers = new Set<ReturnType<typeof setTimeout>>();
+  let removalGeneration = 0;
+  let disposed = false;
+
+  const stopModelListener = pi.events.on(MODEL_INFO_CHANNEL, (value) => {
+    if (disposed || !isModelInfoState(value)) return;
+    modelInfo = value;
+    requestRender?.();
+  });
+
+  const stopGitListener = pi.events.on(GIT_INFO_CHANNEL, (value) => {
+    if (disposed || !isGitInfoState(value)) return;
+    gitInfo = value;
+    requestRender?.();
+  });
+
+  function cancelThemeRemoval() {
+    removalGeneration += 1;
+    for (const timer of themeRemovalTimers) clearTimeout(timer);
+    themeRemovalTimers.clear();
+  }
+
+  function scheduleThemeRemoval(tui: DashboardTui, header: Component) {
+    cancelThemeRemoval();
+    if (disposed) return;
+    const generation = removalGeneration;
+    for (const delay of [0, 50, 250, 1_000]) {
+      const timer = setTimeout(() => {
+        themeRemovalTimers.delete(timer);
+        if (disposed || generation !== removalGeneration || activeHeader !== header) return;
+        if (hideLoadedThemes(tui, header)) {
+          if (disposed || generation !== removalGeneration) return;
+          cancelThemeRemoval();
+          tui.requestRender(true);
+        }
+      }, delay);
+      themeRemovalTimers.add(timer);
+    }
+  }
+
+  function install(ctx: ExtensionContext) {
+    if (disposed || ctx.mode !== "tui") return;
+    const cwd = ctx.cwd;
+
+    ctx.ui.setHeader((tui) => {
+      if (disposed) return { render: () => [], invalidate() {} };
+      activeTui = tui;
+      fullscreenScroll.apply(tui);
+      requestRender = () => tui.requestRender();
+
+      const header = {
+        render(width: number) {
+          if (disposed || activeHeader !== header) return [];
+          const art = TITLE_LINES.map((line, row) =>
+            center(gradientText(line, row * 0.045), width),
+          );
+          const subtitle = center(
+            `${BOLD}${gradientText(title, 0.18)}${RESET}`,
+            width,
+          );
+          return ["", ...art, subtitle, ""];
+        },
+        invalidate() {},
+        dispose() {
+          if (activeHeader !== header) return;
+          activeHeader = undefined;
+          cancelThemeRemoval();
+        },
+      };
+      activeHeader = header;
+      scheduleThemeRemoval(tui, header);
+      return header;
+    });
+
+    ctx.ui.setFooter((tui, theme, footerData: ReadonlyFooterDataProvider) => {
+      if (disposed) return { render: () => [], invalidate() {} };
+      const refresh = () => tui.requestRender();
+      requestRender = refresh;
+
+      const footer = {
+        invalidate() {},
+        dispose() {
+          if (activeFooter !== footer) return;
+          activeFooter = undefined;
+          if (requestRender === refresh) requestRender = undefined;
+        },
+        render(width: number) {
+          if (disposed || activeFooter !== footer) return [];
+          // Reapply when /settings replaces the renderer on a TUI mode switch.
+          fullscreenScroll.apply(tui);
+          const directory = theme.fg("text", formatDirectory(cwd));
+          const fileLabel = gitInfo.changedFiles === 1 ? "file" : "files";
+          let git = gitInfo.branch
+            ? `${gitInfo.branch} · ${gitInfo.changedFiles} ${fileLabel} changed`
+            : "";
+
+          if (gitInfo.pullRequest) {
+            const prLabel = `PR #${gitInfo.pullRequest.number}`;
+            const linkedPr = getCapabilities().hyperlinks
+              ? hyperlink(prLabel, gitInfo.pullRequest.url)
+              : prLabel;
+            git += ` · ${linkedPr}`;
+          }
+
+          const contextPercent =
+            modelInfo.contextPercent === null
+              ? "?"
+              : `${Math.round(modelInfo.contextPercent)}`;
+          const contextWindow =
+            modelInfo.contextWindow > 0
+              ? formatTokens(modelInfo.contextWindow)
+              : "?";
+          const tps =
+            modelInfo.tokensPerSecond === null
+              ? "— tok/s"
+              : `${Math.round(modelInfo.tokensPerSecond)} tok/s`;
+          const summary = modelInfo.summarizing
+            ? "summarizing…"
+            : modelInfo.summary;
+          const usage = `${contextPercent}%/${contextWindow} · $${modelInfo.cost.toFixed(2)} · ${tps}${summary ? ` · ${summary}` : ""}`;
+          const model = modelInfo.provider
+            ? `${modelInfo.provider}/${modelInfo.modelId} · ${modelInfo.thinking}`
+            : modelInfo.modelId;
+
+          const lines = [
+            columns(directory, theme.fg("muted", model), width),
+            columns(theme.fg("muted", usage), theme.fg("muted", git), width),
+          ];
+
+          // Extension statuses render after the two dashboard lines, one per row.
+          const statuses = footerData.getExtensionStatuses();
+          const statusLines = Array.from(statuses.entries())
+            .sort(([a], [b]) => a.localeCompare(b))
+            .flatMap(([, text]) => text.split("\n"));
+          for (const statusLine of statusLines) {
+            lines.push(
+              truncateToWidth(statusLine, width, theme.fg("dim", "...")),
+            );
+          }
+
+          return lines;
+        },
+      };
+      activeFooter = footer;
+      return footer;
+    });
+
+    ctx.ui.setTitle(`pi · ${title}`);
+    pi.events.emit(REFRESH_CHANNEL, undefined);
+  }
+
+  pi.on("session_start", (_event, ctx) => {
+    if (disposed) return;
+    title = formatDirectory(ctx.cwd);
+    modelInfo = emptyModelInfoState();
+    gitInfo = emptyGitInfoState();
+    install(ctx);
+  });
+
+  pi.on("resources_discover", () => {
+    if (!disposed && activeTui && activeHeader) scheduleThemeRemoval(activeTui, activeHeader);
+  });
+
+  pi.on("session_shutdown", (_event, ctx) => {
+    if (disposed) return;
+    disposed = true;
+    cancelThemeRemoval();
+    fullscreenScroll.dispose(activeTui);
+    stopModelListener();
+    stopGitListener();
+    activeTui = undefined;
+    requestRender = undefined;
+    if (ctx.mode === "tui") {
+      if (activeHeader) ctx.ui.setHeader(undefined);
+      if (activeFooter) ctx.ui.setFooter(undefined);
+    }
+    activeHeader = undefined;
+    activeFooter = undefined;
+  });
+}

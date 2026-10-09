@@ -1,71 +1,42 @@
-# My Pi Setup
+# my-pi-setup
 
-Personal Pi coding-agent setup with custom extensions, theme, and settings.
+Rodri's personal pi package for the Babel machine: extensions, skills, and themes, all in one place. Published publicly at `github.com/rodrigomorababel/my-pi-setup`.
 
-## Requirements
+## Layout
 
-- Node.js 22+
-- pnpm 10+
-- git
-- Pi provider credentials configured separately (for example OpenAI/Codex auth)
+- `extensions/` — pi extensions (auto-discovered when this folder is loaded as a package)
+- `skills/` — pi skills (add `SKILL.md` folders here)
+- `themes/` — pi themes (add `.json` theme files here)
 
-Optional, depending on which extensions you use:
+## Loading locally
 
-- `wl-copy` on Wayland/Linux for clipboard support (`copy-all` extension)
-- `git` available in `PATH` for the git status widget
-- A Firecrawl API key for the Firecrawl search/scrape tools
+This folder is registered in `~/.pi/agent/settings.json` under `packages` as a local path, so any new `.ts` file dropped in `extensions/` is picked up automatically on `/reload`.
 
-## Install
+## Fullscreen scrolling
 
-This setup is expected to live at `~/.pi/agent/my-pi-setup`.
+`ui-customization` sets mouse-wheel/trackpad scrolling to **5 lines per tick**
+without modifying Pi's installed files. Use `/reload` after updating this local
+package; the override also reapplies when switching TUI modes in `/settings`.
+Regular terminal scrollback and keyboard scrolling are unchanged.
 
-```bash
-mkdir -p ~/.pi/agent
-git clone https://github.com/rodrigomorababel/my-pi-setup.git ~/.pi/agent/my-pi-setup
-cd ~/.pi/agent/my-pi-setup
-pnpm install
-```
+Pi currently has no public runtime setter for this preference, so the extension
+uses a guarded override of the fullscreen renderer's `wheelScrollLines` field.
+It restores the original value on unload and safely skips incompatible renderers.
+A future Pi internal change may require updating this small compatibility shim.
+The old `patches/pi-wheel-scroll/apply.sh` script is no longer needed.
 
-## Configure environment variables
+## Publishing
 
-Create a local `.env` file from the example:
-
-```bash
-cp .env.example .env
-```
-
-Then edit `.env` and add any required secrets:
-
-```env
-FIRECRAWL_API_KEY=your_firecrawl_key_here
-```
-
-`.env` is intentionally ignored by git.
-
-## Run Pi with this setup
-
-From this directory:
+This folder is already a git repo with `origin` set to the public GitHub repo:
 
 ```bash
-pi
+# push the latest local state
+git add -A && git commit -m "wip"
+git push -u origin main
 ```
 
-## What is included
-
-- `settings.json` — default Pi settings, provider/model, and theme selection
-- `themes/github-dark-default.json` — custom theme
-- `extensions/` — custom Pi extensions and tools
-- `assets/` — setup assets such as preview images
-
-## Updating
+On another machine, install directly from the repo:
 
 ```bash
-cd ~/.pi/agent/my-pi-setup
-git pull
-pnpm install
+pi install git:github.com/rodrigomorababel/my-pi-setup
 ```
-
-## Notes
-
-- Do not commit `.env`, `auth.json`, `models.json`, sessions, or `node_modules`.
-- If Pi cannot find dependencies after pulling updates, run `pnpm install` again.
